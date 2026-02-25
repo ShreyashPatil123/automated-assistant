@@ -1,0 +1,14 @@
+﻿NAME                                                   ID              SIZE      MODIFIED     
+phi3:latest                                            4f2222927938    2.2 GB    3 hours ago     
+minimax-m2.5:cloud                                     c0d5751c800f    -         7 days ago      
+deepseek-r1:8b                                         6995872bfe4c    5.2 GB    7 days ago      
+deepseek-r1:latest                                     6995872bfe4c    5.2 GB    8 days ago      
+fervent_mcclintock/deepseek-r1-0528-qwen3-8b:Q4_K_M    ecc092d5e10a    5.0 GB    8 days ago      
+kimi-k2.5:cloud                                        6d1c3246c608    -         2 weeks ago     
+nomic-embed-text:latest                                0a109f422b47    274 MB    2 weeks ago     
+qwen3-coder:480b-cloud                                 e30e45586389    -         4 weeks ago     
+deepseek-coder:6.7b                                    ce298d984115    3.8 GB    5 weeks ago     
+gpt-oss:120b-cloud                                     569662207105    -         6 weeks ago     
+mistral:latest                                         6577803aa9a0    4.4 GB    6 weeks ago     
+nemotron-3-nano:30b-cloud                              01d0d069a149    -         6 weeks ago     
+llama3.2:3b                                            a80c4f17acd5    2.0 GB    2 months ago    

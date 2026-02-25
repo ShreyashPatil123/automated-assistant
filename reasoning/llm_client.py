@@ -6,10 +6,10 @@ from typing import Optional
 
 class LLMClient:
     def __init__(self, model_path: str, n_ctx: int = 4096, n_gpu_layers: int = -1):
-        # We ignore model_path and use ollama's phi3 to bypass C++ build issues on Windows
-        self.model_name = "phi3"
-        self.ollama_url = "http://localhost:11434/api/generate"
-        logging.info(f"LLMClient initialized using local Ollama API (Model: {self.model_name})")
+        # We use llama3.2:3b as phi3 was corrupted in previous tests.
+        self.model_name = "llama3.2:3b"
+        self.ollama_url = "http://localhost:11434/api/chat"
+        logging.info(f"LLMClient initialized using local Ollama Chat API (Model: {self.model_name})")
 
     def _post_ollama(self, payload: dict, timeout_seconds: int) -> requests.Response:
         try:
@@ -26,26 +26,25 @@ class LLMClient:
 
     def generate_json(self, prompt: str, schema: dict = None, max_tokens: int = 1024, temperature: float = 0.1) -> dict:
         """
-        Generates a JSON response from the LLM via Ollama API.
+        Generates a JSON response from the LLM via Ollama Chat API.
         """
         try:
              payload = {
                  "model": self.model_name,
-                 "prompt": prompt,
+                 "messages": [{"role": "user", "content": prompt}],
                  "stream": False,
+                 "format": "json",
                  "options": {
                      "temperature": temperature,
                      "num_predict": max_tokens,
                      "stop": ["</action>", "</plan>", "</intent>"]
                  }
              }
-             if schema:
-                 payload["format"] = "json"
                  
              response = self._post_ollama(payload, timeout_seconds=120)
              response.raise_for_status()
              result = response.json()
-             text = result.get("response", "")
+             text = result.get("message", {}).get("content", "")
              
              # Extract json by taking the first { and the last }
              start = text.find('{')
@@ -57,8 +56,6 @@ class LLMClient:
                  try:
                      return json.loads(json_str)
                  except json.JSONDecodeError as e:
-                     # Attempt to find an earlier closing brace in case of trailing text
-                     # e.g., {"a":1} Some extra words here}
                      for i in range(end - 1, start, -1):
                          if text[i] == '}':
                              try:
@@ -67,6 +64,7 @@ class LLMClient:
                                  continue
                      raise ValueError(f"Extracted json string was invalid: {e}\nRaw extracted string was:\n{json_str}")
              
+             logging.error(f"RAW OLLAMA OUTPUT (No JSON found): {repr(text)}")
              raise ValueError("Could not extract JSON from LLM response.")
              
         except Exception as e:
@@ -74,10 +72,10 @@ class LLMClient:
              raise
              
     def generate_text(self, prompt: str, max_tokens: int = 512, temperature: float = 0.3) -> str:
-        """Generates raw text (e.g. for context summarization) via Ollama API."""
+        """Generates raw text via Ollama Chat API."""
         payload = {
             "model": self.model_name,
-            "prompt": prompt,
+            "messages": [{"role": "user", "content": prompt}],
             "stream": False,
             "options": {
                 "temperature": temperature,
@@ -86,4 +84,4 @@ class LLMClient:
         }
         res = self._post_ollama(payload, timeout_seconds=120)
         res.raise_for_status()
-        return res.json().get("response", "").strip()
+        return res.json().get("message", {}).get("content", "").strip()

@@ -89,7 +89,11 @@ class DecisionEngine:
                                    .replace("{current_step_idx}", str(step_idx + 1))\
                                    .replace("{total_steps}", str(total_steps))\
                                    .replace("{step_description}", current_step.get("description", "Unknown"))\
-                                   .replace("{screen_state_json}", json.dumps(screen_state, indent=2))\
+                                   .replace("{current_url}", screen_state.get("active_window", {}).get("title", "Unknown URL"))\
+                                   .replace("{page_title}", screen_state.get("active_window", {}).get("title", "Desktop Screen"))\
+                                   .replace("{timestamp}", screen_state.get("timestamp", ""))\
+                                   .replace("{detected_elements_json}", json.dumps(screen_state.get("vision_elements", []), indent=2))\
+                                   .replace("{page_text}", json.dumps(screen_state.get("ocr_elements", []), indent=2))\
                                    .replace("{context_history}", json.dumps(context_history, indent=2))
                                    
         reasks = 0
