@@ -17,6 +17,15 @@ class MockLLMClient:
         if self.responses:
             return self.responses.pop(0)
         return {}
+
+    def generate_text(self, prompt: str) -> str:
+        """DecisionEngine uses generate_text and then parses JSON from it."""
+        if self.responses:
+            value = self.responses.pop(0)
+            if isinstance(value, str):
+                return value
+            return json.dumps(value)
+        return "{}"
         
 class TestIntegrationPipeline(unittest.TestCase):
     def setUp(self):
@@ -57,7 +66,8 @@ class TestIntegrationPipeline(unittest.TestCase):
             "reasoning": "Found OK button in OCR, proceeding to click."
         }
         
-        self.llm.set_responses([expected_intent, expected_plan, expected_action])
+        # Parser/Planner consume JSON, DecisionEngine consumes TEXT that should parse as JSON
+        self.llm.set_responses([expected_intent, expected_plan, json.dumps(expected_action)])
         
         # 2. Parse Instruction
         intent = self.parser.parse("Click the OK button", self.state)
@@ -90,6 +100,32 @@ class TestIntegrationPipeline(unittest.TestCase):
         
         self.assertEqual(action, expected_action)
         self.assertEqual(self.state.llm_call_count, 3)
+
+    def test_decision_invalid_json_fallback(self):
+        intent = {"task_id": "test_task_1", "parsed_goal": "test"}
+        plan = {"steps": [{"step_id": "step_1", "description": "do it", "max_retries": 1}]}
+        self.state.plan = plan
+        self.state.advance_step()
+
+        # Make DecisionEngine receive invalid JSON twice and then fallback
+        self.llm.set_responses([
+            "not json at all",
+            "{bad json}",
+            "still not json",
+        ])
+
+        action = self.decision.get_next_action(
+            intent,
+            self.state.get_current_step(),
+            self.state.current_step_idx,
+            len(self.state.plan["steps"]),
+            {"ocr_elements": [], "vision_elements": []},
+            [],
+            self.state,
+        )
+
+        self.assertEqual(action.get("action_type"), "wait")
+        self.assertTrue(action.get("llm_fallback"))
 
     def test_pipeline_fallback(self):
         # Set max calls to 1 so the planner hits the fallback

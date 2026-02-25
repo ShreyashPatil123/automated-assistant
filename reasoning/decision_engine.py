@@ -17,6 +17,43 @@ class DecisionEngine:
         with open(template_path, 'r') as f:
             self.system_prompt = f.read()
 
+    def parse_action(self, raw_output: str) -> dict:
+        try:
+            # We first try to find {} if there's trailing garbage
+            start = raw_output.find('{')
+            end = raw_output.rfind('}')
+            if start != -1 and end != -1 and start < end:
+                clean_json = raw_output[start:end+1]
+                # fix trailing commas
+                import re
+                clean_json = re.sub(r',\s*\}', '}', clean_json)
+                clean_json = re.sub(r',\s*\]', ']', clean_json)
+                action = json.loads(clean_json)
+            else:
+                action = json.loads(raw_output)
+        except json.JSONDecodeError as e:
+            logger.warning("LLM produced invalid JSON (%s). Raw output: %r", e, raw_output)
+            raise
+
+        if not isinstance(action, dict):
+            logger.warning("LLM action is not a JSON object. Parsed: %r", action)
+            raise ValueError("Invalid action schema: root must be an object")
+
+        action_type = action.get("action_type")
+        params = action.get("parameters")
+
+        if not action_type or not isinstance(action_type, str):
+            logger.warning("LLM action missing/invalid action_type. Action: %r", action)
+            raise ValueError("Invalid action schema: missing action_type")
+
+        if params is None:
+            action["parameters"] = {}
+        elif not isinstance(params, dict):
+            logger.warning("LLM action parameters must be an object/dict. Action: %r", action)
+            raise ValueError("Invalid action schema: parameters must be an object")
+
+        return action
+
     def get_next_action(self, 
                         intent: dict,
                         current_step: dict, 
@@ -30,15 +67,11 @@ class DecisionEngine:
         
         fallback_action = {
             "action_type": "wait",
-            "parameters": {"duration_ms": 2000},
-            "reasoning": "Fallback to wait due to LLM limit/error.",
+            "parameters": {"duration_ms": 1000},
+            "reasoning": "Fallback no-op due to LLM limit or repeated action parsing failures.",
             "llm_fallback": True
         }
         
-        if state.llm_call_count >= max_calls:
-            logger.warning(f"Max LLM calls ({max_calls}) reached. Using fallback action.")
-            return fallback_action
-            
         prompt = self.system_prompt.replace("{goal}", intent.get("parsed_goal", "Unknown Goal"))\
                                    .replace("{current_step_idx}", str(step_idx + 1))\
                                    .replace("{total_steps}", str(total_steps))\
@@ -46,14 +79,28 @@ class DecisionEngine:
                                    .replace("{screen_state_json}", json.dumps(screen_state, indent=2))\
                                    .replace("{context_history}", json.dumps(context_history, indent=2))
                                    
-        # Optional: Rule-based fast-paths can go here before calling the LLM
-        # e.g., if step is "wait_for_download" and loading indicator is present, return {"action_type": "wait"}
+        reasks = 0
+        max_reasks = 2
         
-        state.llm_call_count += 1
-        
-        try:
-            accion_json = self.llm.generate_json(prompt)
-            return accion_json
-        except Exception as e:
-            logger.exception("LLM generation failed during decision. Using fallback action.")
-            return fallback_action
+        while reasks <= max_reasks:
+            if state.llm_call_count >= max_calls:
+                logger.warning(f"Max LLM calls ({max_calls}) reached. Using fallback action.")
+                return fallback_action
+                
+            state.llm_call_count += 1
+            
+            try:
+                raw_text = self.llm.generate_text(prompt)
+                return self.parse_action(raw_text)
+            except Exception as e:
+                logger.exception("LLM generation or parsing failed during decision.")
+                reasks += 1
+                if reasks <= max_reasks:
+                    logger.info("Retrying decision generation...")
+                    # Optional: append failure reason to prompt to hint LLM
+                    prompt += f"\n\nSystem Error on previous attempt: {str(e)}. Please try again and strictly output valid JSON with action_type and parameters."
+                    
+        return {
+            **fallback_action,
+            "reasoning": "Fallback no-op due to repeated invalid action JSON from LLM.",
+        }

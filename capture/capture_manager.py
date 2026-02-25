@@ -4,12 +4,15 @@ import imagehash
 from PIL import Image
 from capture.screen_capture import ScreenCapture
 from capture.cleanup import CaptureCleanup
+import logging
+from collections import deque
 
 class CaptureManager:
     """Orchestrates screen capture, cleanup, and loop detection via caching."""
     def __init__(self, config: dict):
         self.config = config.get("capture", {})
         self.temp_dir = os.path.join(os.getcwd(), "temp_screens")
+        os.makedirs(self.temp_dir, exist_ok=True)
         
         monitor_index = self.config.get("monitor_index", 0)
         self.screen_capture = ScreenCapture(monitor_index=monitor_index)
@@ -25,6 +28,11 @@ class CaptureManager:
         
         self.last_capture_path = None
         self.last_hash = None
+        state_cfg = config.get("state", {})
+        self.loop_repeat_limit = state_cfg.get("repeated_state_limit", 5)
+        self.hash_window_size = max(int(self.loop_repeat_limit) * 2, int(self.loop_repeat_limit))
+        self.hash_history = deque(maxlen=self.hash_window_size)
+        self._consecutive_same_hash = 0
         
     def capture_screen(self, session_id: str, step_id: str) -> dict:
         """
@@ -37,10 +45,13 @@ class CaptureManager:
         
         region = self.config.get("capture_region", None)
         
-        if region:
-            self.screen_capture.capture_region(region, output_path)
-        else:
-            self.screen_capture.capture_full_screen(output_path)
+        try:
+            if region:
+                self.screen_capture.capture_region(region, output_path)
+            else:
+                self.screen_capture.capture_full_screen(output_path)
+        except Exception as e:
+            raise RuntimeError(f"Screen capture failed (monitor_index={self.config.get('monitor_index', 0)}, region={region}): {e}") from e
             
         self.last_capture_path = output_path
         
@@ -61,10 +72,45 @@ class CaptureManager:
         return self.screen_capture.get_monitor_dimensions()
         
     def check_loop(self, new_hash: str) -> bool:
-        """Return True if the new hash exactly matches the last hash."""
-        if not new_hash or not self.last_hash:
+        """Return True if the screen looks stuck based on repeated hashes.
+
+        More robust than a strict equality across the whole window:
+        - Ignores missing hashes (e.g. if hashing fails).
+        - Tracks consecutive repetition and also frequency inside a sliding window.
+        """
+        if not new_hash:
+            self._consecutive_same_hash = 0
             return False
-        return new_hash == self.last_hash
+
+        if self.hash_history and self.hash_history[-1] == new_hash:
+            self._consecutive_same_hash += 1
+        else:
+            self._consecutive_same_hash = 1
+
+        self.hash_history.append(new_hash)
+
+        if self._consecutive_same_hash >= self.loop_repeat_limit:
+            logging.info(
+                "Loop detected by consecutive hash repetition: hash=%s repeats=%s window=%s",
+                new_hash,
+                self._consecutive_same_hash,
+                list(self.hash_history),
+            )
+            return True
+
+        # Frequency-based guard to catch A/B/A/B toggles etc.
+        freq = sum(1 for h in self.hash_history if h == new_hash)
+        if freq >= self.loop_repeat_limit and len(self.hash_history) >= self.loop_repeat_limit:
+            logging.info(
+                "Loop suspected by sliding-window repetition: hash=%s freq=%s/%s window=%s",
+                new_hash,
+                freq,
+                len(self.hash_history),
+                list(self.hash_history),
+            )
+            return True
+
+        return False
         
     def task_complete(self, session_id: str):
         """Called when a task is finished to clean up all its screens immediately."""

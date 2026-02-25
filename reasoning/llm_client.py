@@ -2,6 +2,7 @@ import logging
 import json
 import requests
 import re
+from typing import Optional
 
 class LLMClient:
     def __init__(self, model_path: str, n_ctx: int = 4096, n_gpu_layers: int = -1):
@@ -9,6 +10,19 @@ class LLMClient:
         self.model_name = "phi3"
         self.ollama_url = "http://localhost:11434/api/generate"
         logging.info(f"LLMClient initialized using local Ollama API (Model: {self.model_name})")
+
+    def _post_ollama(self, payload: dict, timeout_seconds: int) -> requests.Response:
+        try:
+            return requests.post(self.ollama_url, json=payload, timeout=timeout_seconds)
+        except requests.exceptions.ConnectionError as e:
+            raise RuntimeError(
+                "Failed to connect to Ollama at http://localhost:11434. "
+                "Fix: install/start Ollama and run 'ollama serve', then ensure the model is available (e.g. 'ollama pull phi3')."
+            ) from e
+        except requests.exceptions.Timeout as e:
+            raise RuntimeError(
+                "Ollama request timed out. Fix: ensure Ollama is running and the model fits your machine; consider reducing context/max tokens."
+            ) from e
 
     def generate_json(self, prompt: str, schema: dict = None, max_tokens: int = 1024, temperature: float = 0.1) -> dict:
         """
@@ -28,7 +42,7 @@ class LLMClient:
              if schema:
                  payload["format"] = "json"
                  
-             response = requests.post(self.ollama_url, json=payload, timeout=120)
+             response = self._post_ollama(payload, timeout_seconds=120)
              response.raise_for_status()
              result = response.json()
              text = result.get("response", "")
@@ -56,7 +70,7 @@ class LLMClient:
              raise ValueError("Could not extract JSON from LLM response.")
              
         except Exception as e:
-             logging.error(f"LLM JSON generation failed: {e}")
+             logging.error("LLM JSON generation failed: %s", e)
              raise
              
     def generate_text(self, prompt: str, max_tokens: int = 512, temperature: float = 0.3) -> str:
@@ -70,6 +84,6 @@ class LLMClient:
                 "num_predict": max_tokens
             }
         }
-        res = requests.post(self.ollama_url, json=payload, timeout=120)
+        res = self._post_ollama(payload, timeout_seconds=120)
         res.raise_for_status()
         return res.json().get("response", "").strip()

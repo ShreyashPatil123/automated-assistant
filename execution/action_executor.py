@@ -21,10 +21,18 @@ class ActionExecutor:
     def execute(self, action_cmd: dict):
         """Dispatches the action command JSON to the correct controller."""
         failsafe.check()
-        
+        if not isinstance(action_cmd, dict):
+            raise ValueError(f"Action command must be a dict, got {type(action_cmd)}")
+            
         action_type = action_cmd.get("action_type")
+        if not action_type or not isinstance(action_type, str):
+            raise ValueError("action_cmd missing required 'action_type' field (string)")
         coords = action_cmd.get("coordinates")
         params = action_cmd.get("parameters", {})
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            raise ValueError("action_cmd 'parameters' must be a dict")
         
         # Resolve target bounding box center if coords aren't explicitly provided
         if not coords and "target" in params and isinstance(params["target"], dict) and "bbox" in params["target"]:
@@ -43,6 +51,10 @@ class ActionExecutor:
             
         x = coords.get("x") if coords else None
         y = coords.get("y") if coords else None
+
+        pointer_actions = {"click", "double_click", "right_click", "move", "scroll"}
+        if action_type in pointer_actions and (x is None or y is None):
+            raise ValueError(f"Action '{action_type}' requires coordinates x/y (or a target bbox in parameters)")
 
         try:
             if self.exec_config.get("dry_run", False):
@@ -106,6 +118,8 @@ class ActionExecutor:
                 
             elif action_type == "run_command":
                 command = params.get("command", "")
+                if not isinstance(command, str) or not command.strip():
+                    raise ValueError("run_command requires non-empty parameters.command")
                 unsafe_mode = self.exec_config.get("unsafe_mode", False)
                 allowed_commands = self.exec_config.get("allowed_commands", [])
                 
@@ -118,7 +132,7 @@ class ActionExecutor:
                 subprocess.Popen(command, shell=True)
                 
             else:
-                logging.warning(f"Unknown action type: {action_type}")
+                raise ValueError(f"Unknown action type: {action_type}")
                 
         except Exception as e:
             logging.error(f"Action execution failed: {e}")

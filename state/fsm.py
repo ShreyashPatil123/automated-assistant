@@ -12,6 +12,7 @@ class FSMState(Enum):
     TASK_COMPLETE = auto()
     ABORTED = auto()
     TIMEOUT = auto()
+    FAILED = auto()
 
 class StateTracker:
     """Holds the current active state variables of the agent."""

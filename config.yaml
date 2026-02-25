@@ -3,6 +3,7 @@ version: "1.0.0"
 system:
   max_actions_per_minute: 60
   loop_idle_sleep_ms: 100
+  allow_mock_on_startup_failure: true
 
 capture:
   monitor_index: 0
@@ -50,6 +51,7 @@ reasoning:
 execution:
   dry_run: false
   unsafe_mode: false
+  step_retry_limit: 3
   allowed_commands: []
   allowed_hotkeys: ["ctrl+c", "ctrl+v", "alt+tab", "win+r"]
   min_type_delay_ms: 30

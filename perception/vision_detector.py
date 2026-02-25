@@ -13,6 +13,8 @@ except ImportError:
 class VisionDetector:
     def __init__(self, config: dict):
         self.config = config.get("perception", {}).get("vision", {})
+        self.system_config = config.get("system", {})
+        self.allow_mock = self.system_config.get("allow_mock_on_startup_failure", False)
         self.yolo_model_path = self.config.get("yolo_model_path", "perception/models/ui_yolov8.pt")
         self.confidence_threshold = self.config.get("confidence_threshold", 0.5)
         self.nms_threshold = self.config.get("nms_threshold", 0.45)
@@ -23,24 +25,48 @@ class VisionDetector:
         
         if YOLO_AVAILABLE:
             if os.path.exists(self.yolo_model_path):
-                logging.info(f"Loading YOLOv8 model from {self.yolo_model_path} on {self.device}")
                 try:
+                    logging.info(f"Loading YOLOv8 model from {self.yolo_model_path} on {self.device}")
                     self.model = YOLO(self.yolo_model_path)
                     # Force model to device if specified
-                    self.model.to(self.device)
+                    try:
+                        self.model.to(self.device)
+                    except Exception as e:
+                        logging.warning(
+                            "YOLO model loaded but moving to device '%s' failed (%s). Falling back to default device.",
+                            self.device,
+                            e,
+                        )
                 except Exception as e:
-                    logging.error(f"Failed to load YOLOv8 model: {e}")
+                    logging.error(
+                        "Failed to load YOLOv8 model from '%s': %s. "
+                        "If you intended to use YOLO, ensure 'ultralytics' is installed and the weights file exists.",
+                        self.yolo_model_path,
+                        e,
+                    )
+                    self.model = None
             else:
-                logging.warning(f"YOLOv8 model file not found at {self.yolo_model_path}. Will use template matching fallback.")
+                logging.error(
+                    "YOLO weights not found at '%s'. "
+                    "Fix: set perception.vision.yolo_model_path to a valid .pt file (e.g. download yolov8n.pt) or disable YOLO by leaving ultralytics uninstalled.",
+                    self.yolo_model_path,
+                )
+                if not self.allow_mock:
+                    logging.warning("Continuing without YOLO (template matching only).")
         else:
-             logging.warning("ultralytics YOLO not installed. Using template matching only.")
+             logging.error(
+                 "ultralytics is not installed; YOLO vision is unavailable. Fix: pip install ultralytics (and torch) if you want detections."
+             )
 
     def detect_elements(self, image_path: str, step_id: str) -> List[Dict[str, Any]]:
         """Run object detection on the screen image."""
         if self.model:
-            results = self._detect_yolo(image_path, step_id)
-            if results:
-                 return results
+            try:
+                results = self._detect_yolo(image_path, step_id)
+                if results:
+                    return results
+            except Exception:
+                logging.exception("YOLO detection crashed; continuing with template matching.")
         
         logging.info("Falling back to OpenCV template matching.")
         return self._detect_templates(image_path, step_id)

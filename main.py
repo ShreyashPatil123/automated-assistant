@@ -17,12 +17,14 @@ from planning.task_planner import TaskPlanner
 from reasoning.instruction_parser import InstructionParser
 from reasoning.decision_engine import DecisionEngine
 from reasoning.llm_client import LLMClient
+from reasoning.mock_llm import MockLLMClient
 from execution.action_executor import ActionExecutor
 from execution.failsafe_monitor import failsafe, FailsafeTriggered
 from memory.database import Database
 from memory.task_store import TaskStore
 from memory.action_log import ActionLog
 from state.fsm import StateTracker, FSMState
+from config_utils import validate_config
 
 # Setup rich console for terminal output
 console = Console()
@@ -30,12 +32,26 @@ console = Console()
 class LADAS:
     def __init__(self, config_path: str = "config.yaml"):
         # 1. Load Config
-        if not os.path.exists(config_path):
-            console.print(f"[bold red]Config file not found at {config_path}. Exiting.[/bold red]")
+        candidate_paths = [config_path]
+        if not os.path.isabs(config_path):
+            candidate_paths.append(os.path.join(os.path.dirname(__file__), config_path))
+            candidate_paths.append(os.path.join(os.path.dirname(__file__), "config.yaml"))
+
+        resolved_config_path = None
+        for p in candidate_paths:
+            if p and os.path.exists(p):
+                resolved_config_path = p
+                break
+
+        if not resolved_config_path:
+            console.print(
+                "[bold red]Config file not found. Tried:\n" + "\n".join(f"- {p}" for p in candidate_paths) + "\nExiting.[/bold red]"
+            )
             sys.exit(1)
             
-        with open(config_path, "r") as f:
-            self.config = yaml.safe_load(f)
+        with open(resolved_config_path, "r") as f:
+            raw_config = yaml.safe_load(f) or {}
+            self.config = validate_config(raw_config)
             
         # 2. Setup Logging
         os.makedirs("logs", exist_ok=True)
@@ -73,7 +89,18 @@ class LADAS:
         # Mock LLM for now if path is missing to avoid crashing
         llm_path = self.config.get("reasoning", {}).get("model_path", "")
         # For a full implementation, proper paths must be set
-        self.llm = LLMClient(model_path=llm_path) 
+        try:
+            self.llm = LLMClient(model_path=llm_path) 
+        except Exception as e:
+            logger.exception("Failed to initialize LLMClient")
+            allow_mock = self.config.get("system", {}).get("allow_mock_on_startup_failure", False)
+            if allow_mock:
+                self.llm = MockLLMClient()
+                logger.warning("Using MockLLMClient due to initialization failure.")
+                console.print("[yellow]Warning: Using MockLLMClient due to failure.[/yellow]")
+            else:
+                console.print("[bold red]Failed to initialize LLM. Configuration forbids mock fallback. See logs for details.[/bold red]")
+                sys.exit(1)
         
         self.parser = InstructionParser(self.llm, self.config)
         self.planner = TaskPlanner(self.llm, self.config)
@@ -91,19 +118,37 @@ class LADAS:
 
     def _validate_startup(self):
         """Validates critical dependencies before starting."""
-        # 1. Check GGUF Model
+        allow_mock = self.config.get("system", {}).get("allow_mock_on_startup_failure", False)
+        
+        # 1. LLM backend note
+        # This repo currently uses Ollama via HTTP (see reasoning/llm_client.py). The config key
+        # 'reasoning.model_path' is kept for future local-gguf support, but we don't hard-fail on it.
         llm_path = self.config.get("reasoning", {}).get("model_path")
-        if not llm_path or not os.path.exists(llm_path):
-            logger.error(f"Critical error: LLM GGUF model not found at {llm_path}")
-            console.print(f"[bold red]Critical error: LLM GGUF model not found at {llm_path}[/bold red]")
-            sys.exit(1)
+        if llm_path and not os.path.exists(llm_path):
+            logger.error(
+                "Config reasoning.model_path points to a missing file: '%s'. "
+                "Note: current LLMClient uses Ollama; this path is not used unless you switch to a local GGUF backend.",
+                llm_path,
+            )
+            console.print(
+                f"[yellow]Warning: reasoning.model_path not found at '{llm_path}'. "
+                "(Current backend uses Ollama; safe to ignore unless you switch backends.)[/yellow]"
+            )
             
         # 2. Check YOLO Model
         yolo_path = self.config.get("perception", {}).get("vision", {}).get("yolo_model_path", "yolov8n.pt")
         if not os.path.exists(yolo_path):
-            logger.error(f"Critical error: YOLO model not found at {yolo_path}")
-            console.print(f"[bold red]Critical error: YOLO model not found at {yolo_path}[/bold red]")
-            sys.exit(1)
+            error_msg = (
+                f"YOLO model not found at '{yolo_path}'. "
+                "Fix: download a YOLOv8 weights file (e.g. yolov8n.pt) and set perception.vision.yolo_model_path in config.yaml. "
+                "The system will fall back to template matching if available."
+            )
+            logger.error(error_msg)
+            if allow_mock:
+                console.print(f"[yellow]{error_msg} (Continuing without YOLO)[/yellow]")
+            else:
+                console.print(f"[bold red]{error_msg}[/bold red]")
+                sys.exit(1)
             
         # 3. Check Template Library (Warn only)
         template_path = self.config.get("perception", {}).get("vision", {}).get("template_library_path")
@@ -219,32 +264,67 @@ class LADAS:
                 console.print(f"[blue]\[EXECUTING][/blue] {step.get('description', 'Unknown Step')}")
                 
                 # Capture Screen
-                cap_data = self.capture.capture_screen(self.session_id, self.state.current_step_id)
+                capture_retries = 3
+                capture_retry_sleep_s = 0.5
+                cap_data = None
+                dims = None
+                for attempt in range(1, capture_retries + 1):
+                    try:
+                        cap_data = self.capture.capture_screen(self.session_id, self.state.current_step_id)
+                        dims = self.capture.get_monitor_dimensions()
+                        break
+                    except Exception:
+                        logger.exception("Screen capture failed (attempt %s/%s)", attempt, capture_retries)
+                        if attempt < capture_retries:
+                            time.sleep(capture_retry_sleep_s)
+
+                if not cap_data or not dims:
+                    console.print("[bold red]Screen capture failed repeatedly. Aborting task.[/bold red]")
+                    self.state.transition_to(FSMState.FAILED)
+                    break
+
                 screen_path = cap_data["path"]
                 screen_hash = cap_data["hash"]
-                dims = self.capture.get_monitor_dimensions()
                 
                 # Check for Infinite Loop
+                history = self.action_log.get_recent_actions(self.state.task_id)
+                last_action_type = history[-1]["action_type"] if history else None
+                is_static_expected = last_action_type in ["wait", "run_command", "scroll"]
+                
                 if self.capture.check_loop(screen_hash):
-                    self.state.repeated_state_count += 1
-                    if self.state.repeated_state_count >= self.config.get("state", {}).get("repeated_state_limit", 5):
-                        logger.warning(f"Infinite loop detected at step {self.state.current_step_id}. Aborting task.")
-                        console.print("[yellow]\[WARNING][/yellow] Infinite loop detected. Aborting task safely.")
-                        self.state.transition_to(FSMState.TASK_COMPLETE)
-                        break
+                    if not is_static_expected:
+                        self.state.repeated_state_count += 1
+                        if self.state.repeated_state_count >= self.config.get("state", {}).get("repeated_state_limit", 5):
+                            logger.warning(f"Infinite loop detected at step {self.state.current_step_id}. Aborting task.")
+                            console.print("[yellow]\[WARNING][/yellow] Infinite loop detected. Aborting task safely.")
+                            self.state.transition_to(FSMState.TASK_COMPLETE)
+                            break
                 else:
                     self.state.repeated_state_count = 0
                     
                 # Perception Pipeline
-                ocr_data = self.ocr.process_image(screen_path, self.state.current_step_id)
-                vis_data = self.vision.detect_elements(screen_path, self.state.current_step_id)
+                try:
+                    ocr_data = self.ocr.process_image(screen_path, self.state.current_step_id)
+                except Exception:
+                    logger.exception("OCR failed; continuing without OCR")
+                    ocr_data = []
+                    
+                try:
+                    vis_data = self.vision.detect_elements(screen_path, self.state.current_step_id)
+                except Exception:
+                    logger.exception("Vision detection failed; continuing without detections")
+                    vis_data = []
                 
-                screen_state = StateBuilder.build_screen_state(
-                    self.session_id, self.state.current_step_id,
-                    self.config.get("capture", {}).get("monitor_index", 0),
-                    self.config.get("capture", {}).get("capture_region", None),
-                    dims, screen_hash, ocr_data, vis_data
-                )
+                try:
+                    screen_state = StateBuilder.build_screen_state(
+                        self.session_id, self.state.current_step_id,
+                        self.config.get("capture", {}).get("monitor_index", 0),
+                        self.config.get("capture", {}).get("capture_region", None),
+                        dims, screen_hash, ocr_data, vis_data
+                    )
+                except Exception:
+                    logger.exception("Failed to build screen_state; using minimal fallback state")
+                    screen_state = {"resolution": dims, "elements": [], "text_regions": [], "screenshot_path": screen_path}
                 
                 # Action Decision
                 history = self.action_log.get_recent_actions(self.state.task_id)
@@ -267,7 +347,18 @@ class LADAS:
                 console.print(f"  ├─ Action: {action_cmd.get('action_type')} | Reason: {action_cmd.get('reasoning')}")
                 
                 # Action Execution
-                self.executor.execute(action_cmd)
+                try:
+                    self.executor.execute(action_cmd)
+                except Exception as e:
+                    logger.exception(f"Executor failed for action: {action_cmd}")
+                    self.state.step_retry_count += 1
+                    retry_limit = self.config.get("execution", {}).get("step_retry_limit", 3)
+                    if self.state.step_retry_count > retry_limit:
+                        console.print(f"[red]  └─ Status: ✗ Action failed repeatedly. Marking step failed.[/red]")
+                        self.state.transition_to(FSMState.STEP_FAILED)
+                    else:
+                        console.print(f"[yellow]  └─ Status: ⚠ Action failed. Retrying ({self.state.step_retry_count}/{retry_limit})...[/yellow]")
+                    continue
                 
                 # Log Action
                 self.action_log.log_action(self.session_id, self.state.task_id, self.state.current_step_id, action_cmd, screen_hash)
