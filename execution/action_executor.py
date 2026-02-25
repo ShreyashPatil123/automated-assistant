@@ -132,7 +132,7 @@ class ActionExecutor:
                 subprocess.Popen(command, shell=True)
                 
             else:
-                raise ValueError(f"Unknown action type: {action_type}")
+                logging.warning(f"Unknown action type: {action_type}, treating as No-Op.")
                 
         except Exception as e:
             logging.error(f"Action execution failed: {e}")

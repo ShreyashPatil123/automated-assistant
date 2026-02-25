@@ -18,6 +18,7 @@ class DecisionEngine:
             self.system_prompt = f.read()
 
     def parse_action(self, raw_output: str) -> dict:
+        action = {}
         try:
             # We first try to find {} if there's trailing garbage
             start = raw_output.find('{')
@@ -33,26 +34,38 @@ class DecisionEngine:
                 action = json.loads(raw_output)
         except json.JSONDecodeError as e:
             logger.warning("LLM produced invalid JSON (%s). Raw output: %r", e, raw_output)
-            raise
+            raise ValueError(f"Invalid JSON: {e}")
 
         if not isinstance(action, dict):
             logger.warning("LLM action is not a JSON object. Parsed: %r", action)
             raise ValueError("Invalid action schema: root must be an object")
 
-        action_type = action.get("action_type")
-        params = action.get("parameters")
+        # Unwrap if the LLM put everything inside an "action" key
+        if "action" in action and isinstance(action["action"], dict):
+            action = action["action"]
+            
+        # Extract action if it was simplified to "action": "click"
+        if "action" in action and isinstance(action["action"], str) and "action_type" not in action:
+            action["action_type"] = action.pop("action")
+
+        action_type = action.get("action_type") or action.get("type") or action.get("action_name")
+        params = action.get("parameters") or action.get("params") or {}
 
         if not action_type or not isinstance(action_type, str):
             logger.warning("LLM action missing/invalid action_type. Action: %r", action)
             raise ValueError("Invalid action schema: missing action_type")
 
-        if params is None:
-            action["parameters"] = {}
+        if isinstance(params, list):
+            params = {"items": params}
         elif not isinstance(params, dict):
             logger.warning("LLM action parameters must be an object/dict. Action: %r", action)
             raise ValueError("Invalid action schema: parameters must be an object")
 
-        return action
+        return {
+            "action_type": action_type.lower().replace(" ", "_"),
+            "parameters": params,
+            "reasoning": action.get("reasoning", "")
+        }
 
     def get_next_action(self, 
                         intent: dict,

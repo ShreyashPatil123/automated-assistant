@@ -355,7 +355,12 @@ class LADAS:
                     retry_limit = self.config.get("execution", {}).get("step_retry_limit", 3)
                     if self.state.step_retry_count > retry_limit:
                         console.print(f"[red]  └─ Status: ✗ Action failed repeatedly. Marking step failed.[/red]")
-                        self.state.transition_to(FSMState.STEP_FAILED)
+                        self.task_store.update_step_status(
+                            self.state.task_id, self.state.current_step_id,
+                            "FAILED", self.state.step_retry_count,
+                        )
+                        if not self.state.advance_step():
+                            break
                     else:
                         console.print(f"[yellow]  └─ Status: ⚠ Action failed. Retrying ({self.state.step_retry_count}/{retry_limit})...[/yellow]")
                     continue
@@ -363,14 +368,76 @@ class LADAS:
                 # Log Action
                 self.action_log.log_action(self.session_id, self.state.task_id, self.state.current_step_id, action_cmd, screen_hash)
                 
-                # Validation (simplified: move to next step immediately for this mock structure)
-                # In full system, we re-capture and check success criteria via LLM.
-                time.sleep(1) # wait for action to settle
-                console.print(f"  └─ Status: ✓ Step complete (Mocked validation)")
+                # --- Real result validation ---
+                # Wait for the action to settle
+                post_wait = max(action_cmd.get("post_action_wait_ms", 500) / 1000.0, 0.5)
+                time.sleep(post_wait)
+                
+                # Re-capture the screen after the action
+                self.state.transition_to(FSMState.VALIDATING)
+                post_cap_data = None
+                for attempt in range(1, 3):
+                    try:
+                        post_cap_data = self.capture.capture_screen(
+                            self.session_id, f"{self.state.current_step_id}_post"
+                        )
+                        break
+                    except Exception:
+                        logger.warning("Post-action capture failed (attempt %s/2)", attempt)
+                        time.sleep(0.3)
+                
+                # Determine whether the screen actually changed
+                action_type = action_cmd.get("action_type", "")
+                no_change_ok = action_type in ("wait", "scroll", "hover", "move", "press_key")
+                
+                if post_cap_data:
+                    post_hash = post_cap_data["hash"]
+                    # check_loop returns True when screen is unchanged
+                    screen_unchanged = self.capture.check_loop(post_hash)
+                
+                    if screen_unchanged and not no_change_ok:
+                        # Action had no visible effect — retry with backoff
+                        self.state.step_retry_count += 1
+                        retry_limit = self.config.get("execution", {}).get("step_retry_limit", 3)
+                        if self.state.step_retry_count <= retry_limit:
+                            delay = min(
+                                self.config.get("state", {}).get("base_delay", 1.0)
+                                * (2 ** self.state.step_retry_count),
+                                self.config.get("state", {}).get("max_delay", 30.0)
+                            )
+                            console.print(
+                                f"  [yellow][RETRY {self.state.step_retry_count}/{retry_limit}][/yellow] "
+                                f"Screen unchanged. Retrying in {delay:.1f}s..."
+                            )
+                            self.state.transition_to(FSMState.RETRYING)
+                            time.sleep(delay)
+                            continue  # back to top of while loop — re-capture, re-decide, re-execute
+                        else:
+                            console.print(
+                                f"  [red][STEP FAILED][/red] Screen unchanged after "
+                                f"{retry_limit} retries. Moving to next step."
+                            )
+                            self.task_store.update_step_status(
+                                self.state.task_id, self.state.current_step_id,
+                                "FAILED", self.state.step_retry_count,
+                            )
+                    else:
+                        console.print(
+                            f"  └─ [green]✓ Step complete[/green] "
+                            f"({'screen changed' if not no_change_ok else 'action acknowledged'})"
+                        )
+                        self.task_store.update_step_status(
+                            self.state.task_id, self.state.current_step_id,
+                            "COMPLETED", self.state.step_retry_count,
+                        )
+                else:
+                    # Post-capture failed — assume step completed to avoid stalling
+                    console.print("  └─ [yellow]✓ Step assumed complete (post-capture failed)[/yellow]")
                 
                 if not self.state.advance_step():
                     # Task completed
                     break
+                # --- End real result validation ---
                     
                 # Loop throttling
                 idle_sleep = self.config.get("system", {}).get("loop_idle_sleep_ms", 100) / 1000.0

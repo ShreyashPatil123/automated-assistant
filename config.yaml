@@ -46,14 +46,37 @@ state:
 
 reasoning:
   model_path: "models/Phi-3-mini-4k-instruct-q4.gguf"
-  max_llm_calls_per_task: 20
+  max_llm_calls_per_task: 200
 
 execution:
   dry_run: false
   unsafe_mode: false
   step_retry_limit: 3
   allowed_commands: []
-  allowed_hotkeys: ["ctrl+c", "ctrl+v", "alt+tab", "win+r"]
+  allowed_hotkeys:
+    - "ctrl+c"
+    - "ctrl+v"
+    - "ctrl+x"
+    - "ctrl+z"
+    - "ctrl+y"
+    - "ctrl+s"
+    - "ctrl+a"
+    - "ctrl+f"
+    - "ctrl+l"
+    - "ctrl+t"
+    - "ctrl+w"
+    - "ctrl+r"
+    - "ctrl+shift+t"
+    - "alt+tab"
+    - "alt+f4"
+    - "win+r"
+    - "win+e"
+    - "win+d"
+    - "f5"
+    - "f11"
+    - "enter"
+    - "escape"
+    - "tab"
   min_type_delay_ms: 30
   max_type_delay_ms: 80
   cursor_speed_multiplier: 1.0
