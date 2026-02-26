@@ -131,6 +131,11 @@ class ActionExecutor:
                 logging.info(f"Running command: {command}")
                 subprocess.Popen(command, shell=True)
                 
+            elif action_type == "screenshot":
+                # Handled specifically by the orchestration layer to force a re-captcha
+                # No hardware control needed here.
+                logging.info("Explicit screenshot requested by LLM. Passing to orchestrator.")
+                
             else:
                 logging.warning(f"Unknown action type: {action_type}, treating as No-Op.")
                 
