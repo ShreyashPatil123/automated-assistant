@@ -49,11 +49,17 @@ class ActionExecutor:
         if pre_wait > 0:
             time.sleep(pre_wait)
             
+        global_offset_x, global_offset_y = action_cmd.get("global_offset", (0, 0))
+        
         x = coords.get("x") if coords else None
         y = coords.get("y") if coords else None
 
-        pointer_actions = {"click", "double_click", "right_click", "move", "scroll"}
-        if action_type in pointer_actions and (x is None or y is None):
+        # Apply multi-monitor global offset
+        if x is not None: x += global_offset_x
+        if y is not None: y += global_offset_y
+
+        pointer_actions = {"click", "double_click", "right_click", "move", "scroll", "drag"}
+        if action_type in pointer_actions and (x is None or y is None) and action_type != "scroll":
             raise ValueError(f"Action '{action_type}' requires coordinates x/y (or a target bbox in parameters)")
 
         try:

@@ -53,6 +53,11 @@ class ScreenCapture:
         """Returns (width, height) of the selected monitor."""
         monitor = self.sct.monitors[self.monitor_index]
         return (monitor["width"], monitor["height"])
+
+    def get_monitor_offset(self) -> tuple[int, int]:
+        """Returns the global (left, top) offset of the selected monitor."""
+        monitor = self.sct.monitors[self.monitor_index]
+        return (monitor["left"], monitor["top"])
         
     def close(self):
         """Clean up mss resources."""

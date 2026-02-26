@@ -269,10 +269,13 @@ class LADAS:
                 capture_retry_sleep_s = 0.5
                 cap_data = None
                 dims = None
+                monitor_offset = (0, 0)
+                
                 for attempt in range(1, capture_retries + 1):
                     try:
                         cap_data = self.capture.capture_screen(self.session_id, self.state.current_step_id)
                         dims = self.capture.get_monitor_dimensions()
+                        monitor_offset = self.capture.screen_capture.get_monitor_offset()
                         break
                     except Exception:
                         logger.exception("Screen capture failed (attempt %s/%s)", attempt, capture_retries)
@@ -359,6 +362,8 @@ class LADAS:
                 
                 # Action Execution
                 try:
+                    # Inject global offset into the action command so the executor knows where to click
+                    action_cmd["global_offset"] = monitor_offset
                     self.executor.execute(action_cmd)
                 except PermissionError as pe:
                     # --- ISSUE 5 FIX: Sandbox Policy Soft Failure ---

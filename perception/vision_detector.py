@@ -15,7 +15,9 @@ class VisionDetector:
         self.config = config.get("perception", {}).get("vision", {})
         self.system_config = config.get("system", {})
         self.allow_mock = self.system_config.get("allow_mock_on_startup_failure", False)
-        self.yolo_model_path = self.config.get("yolo_model_path", "perception/models/ui_yolov8.pt")
+        # Use the raw filename. Ultralytics will automatically download it to the root 
+        # directory if it isn't found locally.
+        self.yolo_model_path = self.config.get("yolo_model_path", "yolov8n.pt").split('/')[-1]
         self.confidence_threshold = self.config.get("confidence_threshold", 0.5)
         self.nms_threshold = self.config.get("nms_threshold", 0.45)
         self.device = self.config.get("detection_device", "cuda")

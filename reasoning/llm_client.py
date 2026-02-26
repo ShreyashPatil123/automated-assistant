@@ -6,8 +6,12 @@ from typing import Optional
 
 class LLMClient:
     def __init__(self, model_path: str, n_ctx: int = 4096, n_gpu_layers: int = -1):
-        # We use llama3.2:3b as phi3 was corrupted in previous tests.
-        self.model_name = "llama3.2:3b"
+        # Clean the model name from the path so it works seamlessly with Ollama
+        # Example: "models/phi3.gguf" becomes "phi3"
+        clean_model = model_path.split('/')[-1].replace('.gguf', '')
+        
+        # Default to a standard model if nothing is provided
+        self.model_name = clean_model if clean_model else "llama3.2"
         self.ollama_url = "http://localhost:11434/api/chat"
         logging.info(f"LLMClient initialized using local Ollama Chat API (Model: {self.model_name})")
 
