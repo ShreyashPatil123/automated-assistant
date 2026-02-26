@@ -1,4 +1,5 @@
 import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import yaml
 import logging
 from perception.ocr_engine import OCREngine

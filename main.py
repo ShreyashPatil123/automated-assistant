@@ -1,4 +1,5 @@
 import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import sys
 import yaml
 import logging
@@ -346,9 +347,40 @@ class LADAS:
                      
                 console.print(f"  ├─ Action: {action_cmd.get('action_type')} | Reason: {action_cmd.get('reasoning')}")
                 
+                # --- ISSUE 3 FIX: Catch the "abort" command from DecisionEngine ---
+                # When the LLM call limit is hit, DecisionEngine now returns
+                # action_type="abort" instead of "wait".  We catch it here to
+                # prevent the old silent-success loop where "wait" was treated
+                # as a non-mutating success, advancing the FSM while doing nothing.
+                if action_cmd.get("action_type") == "abort":
+                    console.print(f"\n[bold red][ABORTED][/bold red] {action_cmd.get('reasoning', 'LLM limit reached.')}")
+                    self.state.transition_to(FSMState.FAILED)
+                    break
+                
                 # Action Execution
                 try:
                     self.executor.execute(action_cmd)
+                except PermissionError as pe:
+                    # --- ISSUE 5 FIX: Sandbox Policy Soft Failure ---
+                    # Instead of crashing or counting toward step_retry_count,
+                    # feed the permission error back to the LLM so it can
+                    # rethink its approach (e.g., use a hotkey instead of
+                    # a blocked system command).  This mirrors how a DOM
+                    # SecurityError is caught and reported without killing
+                    # the page.
+                    logger.warning("PermissionError (sandbox policy): %s", pe)
+                    console.print(f"[yellow]  └─ Status: ⚠ Blocked by safety policy: {pe}[/yellow]")
+                    console.print(f"[yellow]      LLM will be re-queried to try a different approach.[/yellow]")
+                    # Inject the error into action history so the LLM sees it
+                    self.action_log.log_action(
+                        self.session_id, self.state.task_id,
+                        self.state.current_step_id,
+                        {"action_type": action_cmd.get("action_type"),
+                         "error": f"PermissionError: {pe}",
+                         "reasoning": "Action blocked by sandbox policy. Choose a different approach."},
+                        screen_hash
+                    )
+                    continue  # Re-enter loop: re-capture, re-decide, but don't burn retries
                 except Exception as e:
                     logger.exception(f"Executor failed for action: {action_cmd}")
                     self.state.step_retry_count += 1
@@ -368,76 +400,102 @@ class LADAS:
                 # Log Action
                 self.action_log.log_action(self.session_id, self.state.task_id, self.state.current_step_id, action_cmd, screen_hash)
                 
-                # --- Real result validation ---
-                # Wait for the action to settle
+                # --- ISSUE 2 FIX: Render-to-Execution Synchronization ---
+                # Instead of immediately checking the screen and burning LLM
+                # calls while the UI is loading (the "LLM Drain" bug), we use
+                # a localized polling loop analogous to waiting for
+                # DOMContentLoaded / layout settling.  We poll the screen hash
+                # with exponential backoff, only declaring failure after the
+                # max polling duration is exhausted.
+
                 post_wait = max(action_cmd.get("post_action_wait_ms", 500) / 1000.0, 0.5)
                 time.sleep(post_wait)
                 
-                # Re-capture the screen after the action
                 self.state.transition_to(FSMState.VALIDATING)
-                post_cap_data = None
-                for attempt in range(1, 3):
-                    try:
-                        post_cap_data = self.capture.capture_screen(
-                            self.session_id, f"{self.state.current_step_id}_post"
-                        )
-                        break
-                    except Exception:
-                        logger.warning("Post-action capture failed (attempt %s/2)", attempt)
-                        time.sleep(0.3)
                 
-                # Determine whether the screen actually changed
                 action_type = action_cmd.get("action_type", "")
                 no_change_ok = action_type in ("wait", "scroll", "hover", "move", "press_key")
-                
-                if post_cap_data:
+
+                # --- Localized screen-polling loop ---
+                # Poll the screen to see if the UI has settled / changed.
+                # This prevents re-entering the LLM decision loop while a
+                # page or dialog is still loading.
+                poll_limit = self.config.get("execution", {}).get("step_retry_limit", 3)
+                base_delay = self.config.get("state", {}).get("base_delay", 1.0)
+                max_delay = self.config.get("state", {}).get("max_delay", 30.0)
+                screen_changed = False
+
+                for poll_attempt in range(1, poll_limit + 1):
+                    post_cap_data = None
+                    for cap_try in range(1, 3):
+                        try:
+                            post_cap_data = self.capture.capture_screen(
+                                self.session_id, f"{self.state.current_step_id}_post_{poll_attempt}"
+                            )
+                            break
+                        except Exception:
+                            logger.warning("Post-action capture failed (attempt %s/2)", cap_try)
+                            time.sleep(0.3)
+
+                    if not post_cap_data:
+                        # Capture itself failed — assume changed to avoid stalling
+                        screen_changed = True
+                        break
+
                     post_hash = post_cap_data["hash"]
-                    # check_loop returns True when screen is unchanged
                     screen_unchanged = self.capture.check_loop(post_hash)
-                
-                    if screen_unchanged and not no_change_ok:
-                        # Action had no visible effect — retry with backoff
-                        self.state.step_retry_count += 1
-                        retry_limit = self.config.get("execution", {}).get("step_retry_limit", 3)
-                        if self.state.step_retry_count <= retry_limit:
-                            delay = min(
-                                self.config.get("state", {}).get("base_delay", 1.0)
-                                * (2 ** self.state.step_retry_count),
-                                self.config.get("state", {}).get("max_delay", 30.0)
-                            )
-                            console.print(
-                                f"  [yellow][RETRY {self.state.step_retry_count}/{retry_limit}][/yellow] "
-                                f"Screen unchanged. Retrying in {delay:.1f}s..."
-                            )
-                            self.state.transition_to(FSMState.RETRYING)
-                            time.sleep(delay)
-                            continue  # back to top of while loop — re-capture, re-decide, re-execute
-                        else:
-                            console.print(
-                                f"  [red][STEP FAILED][/red] Screen unchanged after "
-                                f"{retry_limit} retries. Moving to next step."
-                            )
-                            self.task_store.update_step_status(
-                                self.state.task_id, self.state.current_step_id,
-                                "FAILED", self.state.step_retry_count,
-                            )
+
+                    if not screen_unchanged or no_change_ok:
+                        # Screen actually changed, or the action type doesn't
+                        # require a visible change — success.
+                        screen_changed = True
+                        break
+
+                    # Screen still looks the same — UI might still be loading.
+                    # Wait with exponential backoff before polling again.
+                    delay = min(base_delay * (2 ** (poll_attempt - 1)), max_delay)
+                    console.print(
+                        f"  [dim][POLL {poll_attempt}/{poll_limit}][/dim] "
+                        f"Screen unchanged. Waiting {delay:.1f}s for UI to settle..."
+                    )
+                    time.sleep(delay)
+
+                # --- Evaluate polling result ---
+                if screen_changed:
+                    console.print(
+                        f"  └─ [green]✓ Step complete[/green] "
+                        f"({'screen changed' if not no_change_ok else 'action acknowledged'})"
+                    )
+                    self.task_store.update_step_status(
+                        self.state.task_id, self.state.current_step_id,
+                        "COMPLETED", self.state.step_retry_count,
+                    )
+                else:
+                    # Screen remained static after full polling window.
+                    # NOW increment retry and re-enter the LLM decision loop.
+                    self.state.step_retry_count += 1
+                    retry_limit = self.config.get("execution", {}).get("step_retry_limit", 3)
+                    if self.state.step_retry_count <= retry_limit:
+                        console.print(
+                            f"  [yellow][RETRY {self.state.step_retry_count}/{retry_limit}][/yellow] "
+                            f"Screen static after {poll_limit} polls. Re-deciding action..."
+                        )
+                        self.state.transition_to(FSMState.RETRYING)
+                        continue  # Back to top — re-capture, re-decide, re-execute
                     else:
                         console.print(
-                            f"  └─ [green]✓ Step complete[/green] "
-                            f"({'screen changed' if not no_change_ok else 'action acknowledged'})"
+                            f"  [red][STEP FAILED][/red] Screen unchanged after "
+                            f"{retry_limit} attempts. Moving to next step."
                         )
                         self.task_store.update_step_status(
                             self.state.task_id, self.state.current_step_id,
-                            "COMPLETED", self.state.step_retry_count,
+                            "FAILED", self.state.step_retry_count,
                         )
-                else:
-                    # Post-capture failed — assume step completed to avoid stalling
-                    console.print("  └─ [yellow]✓ Step assumed complete (post-capture failed)[/yellow]")
                 
                 if not self.state.advance_step():
                     # Task completed
                     break
-                # --- End real result validation ---
+                # --- End render-to-execution synchronization ---
                     
                 # Loop throttling
                 idle_sleep = self.config.get("system", {}).get("loop_idle_sleep_ms", 100) / 1000.0

@@ -52,7 +52,14 @@ execution:
   dry_run: false
   unsafe_mode: false
   step_retry_limit: 3
-  allowed_commands: []
+  allowed_commands:
+    - "notepad"
+    - "calc"
+    - "explorer"
+    - "mspaint"
+    - "cmd /c start"
+    - "powershell -Command"
+    - "start"
   allowed_hotkeys:
     - "ctrl+c"
     - "ctrl+v"

@@ -63,7 +63,8 @@ class TestIntegrationPipeline(unittest.TestCase):
                     "bbox": [100, 100, 150, 120]
                 }
             },
-            "reasoning": "Found OK button in OCR, proceeding to click."
+            "reasoning": "Found OK button in OCR, proceeding to click.",
+            "coordinates": {"x": 125.0, "y": 110.0}
         }
         
         # Parser/Planner consume JSON, DecisionEngine consumes TEXT that should parse as JSON
@@ -124,7 +125,7 @@ class TestIntegrationPipeline(unittest.TestCase):
             self.state,
         )
 
-        self.assertEqual(action.get("action_type"), "wait")
+        self.assertEqual(action.get("action_type"), "abort")
         self.assertTrue(action.get("llm_fallback"))
 
     def test_pipeline_fallback(self):

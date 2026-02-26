@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import logging
 from reasoning.llm_client import LLMClient
 from state.fsm import StateTracker
@@ -26,7 +27,6 @@ class DecisionEngine:
             if start != -1 and end != -1 and start < end:
                 clean_json = raw_output[start:end+1]
                 # fix trailing commas
-                import re
                 clean_json = re.sub(r',\s*\}', '}', clean_json)
                 clean_json = re.sub(r',\s*\]', ']', clean_json)
                 action = json.loads(clean_json)
@@ -61,9 +61,48 @@ class DecisionEngine:
             logger.warning("LLM action parameters must be an object/dict. Action: %r", action)
             raise ValueError("Invalid action schema: parameters must be an object")
 
+        # --- ISSUE 1 FIX: Coordinate Schema Normalization ---
+        # Small local LLMs often flatten nested structures, producing
+        # {"action_type": "click", "x": 500, "y": 600} instead of the
+        # proper {"coordinates": {"x": 500, "y": 600}}.  We normalise
+        # all known shapes into a single top-level `coordinates` dict
+        # so the downstream ActionExecutor never sees a schema mismatch.
+
+        coords = action.get("coordinates")
+
+        # Case 1: Raw x/y at root level (most common LLM flattening error)
+        if not coords and "x" in action and "y" in action:
+            coords = {"x": action.pop("x"), "y": action.pop("y")}
+            logger.info("Normalised flat root x/y → coordinates dict: %s", coords)
+
+        # Case 2: x/y inside parameters (another common LLM output shape)
+        if not coords and "x" in params and "y" in params:
+            coords = {"x": params.pop("x"), "y": params.pop("y")}
+            logger.info("Normalised params.x/y → coordinates dict: %s", coords)
+
+        # Case 3: target.bbox inside parameters → resolve to center
+        if not coords and "target" in params and isinstance(params["target"], dict):
+            bbox = params["target"].get("bbox")
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                coords = {
+                    "x": bbox[0] + (bbox[2] - bbox[0]) / 2,
+                    "y": bbox[1] + (bbox[3] - bbox[1]) / 2,
+                }
+                logger.info("Resolved target.bbox %s → coordinates center: %s", bbox, coords)
+
+        # Case 4: coordinates supplied as a list [x, y]
+        if isinstance(coords, (list, tuple)) and len(coords) >= 2:
+            coords = {"x": coords[0], "y": coords[1]}
+            logger.info("Normalised list coordinates → dict: %s", coords)
+
+        # Ensure params is always a dict (never None)
+        if params is None:
+            params = {}
+
         return {
             "action_type": action_type.lower().replace(" ", "_"),
             "parameters": params,
+            "coordinates": coords,  # None when action doesn't need coords
             "reasoning": action.get("reasoning", "")
         }
 
@@ -78,10 +117,15 @@ class DecisionEngine:
         """Determines the next action based on current state and step."""
         max_calls = self.config.get("reasoning", {}).get("max_llm_calls_per_task", 20)
         
+        # --- ISSUE 3 FIX: Abort instead of silent wait ---
+        # Previously this was "wait", which the main loop treated as a
+        # non-mutating success → the FSM would advance to the next step
+        # and mark the task [COMPLETE] while doing nothing.  "abort"
+        # forces the execution loop to trigger FSMState.FAILED and break.
         fallback_action = {
-            "action_type": "wait",
-            "parameters": {"duration_ms": 1000},
-            "reasoning": "Fallback no-op due to LLM limit or repeated action parsing failures.",
+            "action_type": "abort",
+            "parameters": {},
+            "reasoning": "LLM call limit reached or repeated JSON parse failures. Aborting task.",
             "llm_fallback": True
         }
         
@@ -119,5 +163,5 @@ class DecisionEngine:
                     
         return {
             **fallback_action,
-            "reasoning": "Fallback no-op due to repeated invalid action JSON from LLM.",
+            "reasoning": "Fallback abort due to repeated invalid action JSON from LLM.",
         }
